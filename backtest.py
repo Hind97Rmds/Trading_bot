@@ -380,7 +380,10 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                     f_mode == 'all' or (f_mode == 'star' and l['star']) or
                     (f_mode == 'star_fan' and (l['star'] or l['fan'])))]
                 res['cycle_logs'].append({'symbol': symbol, 'time_ts': t_start.timestamp(),
-                                           'time_dt': t_start, 'close': close, 'levels': len(active_lv)})
+                                           'time_dt': t_start, 'close': close, 'levels': len(active_lv),
+                                           'level_details': [{'key': l['key'], 'price': l['price'],
+                                                               'dir': l['dir'], 'star': l['star'],
+                                                               'fan': l['fan']} for l in active_lv]})
                 level_used = set()
                 exec_mode_bt = bot_state.get('gann_execution_mode', 'instant')
                 spike_limit = bot_state.get('gann_spike_limit_pts', 20) * pv
@@ -624,6 +627,37 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
         for i in range(1, 11): ws_trades.column_dimensions[get_column_letter(i)].width = 22.0
         if exec_mode == 'all_concurrent':
             _add_concurrent_analysis_sheets(wb, res['trade_logs'], pnl_key='ربح ($)', outcome_key='النتيجة')
+
+        # ── "دورات H1" sheet: every anchor cycle's close + the full level
+        # ladder that resulted from it, listed directly underneath. This is
+        # the data that was already being computed (cycle_logs) but never
+        # actually written to the report -- only its COUNT was mentioned in
+        # the Telegram summary line above ("دورات H1: N").
+        if res['cycle_logs']:
+            ws_cyc = wb.create_sheet("دورات H1")
+            ws_cyc.append(["الزوج", "الدورة (DAM)", "إغلاق 1H", "عدد الصفقات", "ملاحظة"])
+            for cell in ws_cyc[1]: cell.fill = gray_fill; cell.font = Font(bold=True)
+            level_hdr_row_style = PatternFill(start_color="EFEFEF", end_color="EFEFEF", fill_type="solid")
+            for cdef_log in sorted(res['cycle_logs'], key=lambda c: c['time_ts']):
+                trades_in_cycle = sum(1 for tr in res['trade_logs'] if tr.get('cycle_ts') == cdef_log['time_ts'])
+                note = f"تم تنفيذ {trades_in_cycle} صفقة" if trades_in_cycle > 0 else "لم يلمس السعر أي مستوى"
+                dam_time = _utc_to_dam(cdef_log['time_dt']).strftime('%Y-%m-%d %H:%M')
+                ws_cyc.append([cdef_log['symbol'], dam_time, round(cdef_log['close'], 3),
+                               trades_in_cycle, note])
+                for cell in ws_cyc[ws_cyc.max_row]: cell.fill = gray_fill; cell.font = Font(bold=True)
+
+                # every resulting level for this cycle, directly below its
+                # summary row -- mirrors the same addition made to the MQL5
+                # port's Excel export (anchor close + full level ladder).
+                for lv in cdef_log.get('level_details', []):
+                    tag = '⭐' if lv['star'] else ('🌀' if lv['fan'] else '•')
+                    dir_lbl = 'مقاومة/بيع' if lv['dir'] == 'up' else 'دعم/شراء'
+                    ws_cyc.append(["", "", f"{tag} {lv['key']} — {round(lv['price'], 3)}", "", dir_lbl])
+                ws_cyc.append([])  # blank spacer row between cycles
+            for i in range(1, 6): ws_cyc.column_dimensions[get_column_letter(i)].width = 24.0
+            for row in ws_cyc.iter_rows():
+                for cell in row: cell.border = thin_border; cell.alignment = center_align
+
         wb.save(fname)
         await prog.done(f'<b>باكتيست جان اكتمل ✅</b>\n{syms_label} — {len(res["trade_logs"])} صفقة\nجاري إرسال التقرير...')
         await send_tg_document(fname, sum_text)
