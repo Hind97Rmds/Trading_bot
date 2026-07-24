@@ -117,11 +117,47 @@ def _load_csv_candle_file(csv_path: str, broker_utc_offset_hours: float) -> list
         return []
 
 
+# Tracks what the LAST run of run_gann_backtest/run_live_twin_simulation
+# actually used, per (symbol, granularity) -- reset at the start of each
+# run via _reset_data_source_stats(), read back at the end to report the
+# true source used, not just the configured intention.
+_data_source_stats = {'csv_hits': {}, 'oanda_fallbacks': {}, 'csv_files_missing': set()}
+
+
+def _reset_data_source_stats():
+    _data_source_stats['csv_hits'] = {}
+    _data_source_stats['oanda_fallbacks'] = {}
+    _data_source_stats['csv_files_missing'] = set()
+
+
+def _format_data_source_report() -> str:
+    csv_dir = bot_state.get('csv_data_dir')
+    if not csv_dir:
+        return "📡 مصدر البيانات: OANDA (وضع CSV غير مفعّل)"
+    hits = _data_source_stats['csv_hits']
+    misses = _data_source_stats['oanda_fallbacks']
+    missing_files = _data_source_stats['csv_files_missing']
+    lines = [f"📂 مجلد CSV المُعتمَد: <code>{csv_dir}</code>"]
+    if hits:
+        hit_str = ', '.join(f"{tf}: {n} شمعة" for tf, n in sorted(hits.items()))
+        lines.append(f"✅ قُرئ فعلياً من CSV → {hit_str}")
+    if misses:
+        miss_str = ', '.join(f"{tf}: {n} استدعاء" for tf, n in sorted(misses.items()))
+        lines.append(f"☁️ رجع لـOANDA فعلياً (لم يجد ملف CSV مطابق) → {miss_str}")
+    if missing_files:
+        lines.append("🔍 أسماء الملفات التي بحث عنها ولم يجدها:\n" + '\n'.join(f"  • <code>{f}</code>" for f in sorted(missing_files)))
+    if not hits and not misses:
+        lines.append("⚠️ لم يُستدعَ أي جلب بيانات بعد.")
+    return '\n'.join(lines)
+
+
 async def _fetch_candles_hybrid(symbol: str, granularity_str: str, count: int = 5000,
                                  end_time: datetime = None) -> list:
     """Drop-in replacement for fetch_candles(): uses a matching MT5-exported
     CSV file when bot_state['csv_data_dir'] is set AND the file exists,
-    otherwise transparently falls back to the normal OANDA fetch_candles()."""
+    otherwise transparently falls back to the normal OANDA fetch_candles().
+    Records which source was actually used in _data_source_stats so the
+    caller can report ground truth, not just the configured intention."""
     csv_dir = bot_state.get('csv_data_dir')
     if csv_dir:
         suffix = _TF_TO_MT5_SUFFIX.get(granularity_str)
@@ -135,7 +171,14 @@ async def _fetch_candles_hybrid(symbol: str, granularity_str: str, count: int = 
                     end = end_time if end_time else datetime.now(timezone.utc)
                     end_ts = pd.Timestamp(end).tz_convert('UTC') if pd.Timestamp(end).tzinfo else pd.Timestamp(end, tz='UTC')
                     filtered = [c for c in candles if c['time'] <= end_ts]
-                    return filtered[-count:] if count else filtered
+                    result = filtered[-count:] if count else filtered
+                    _data_source_stats['csv_hits'][granularity_str] = \
+                        _data_source_stats['csv_hits'].get(granularity_str, 0) + len(result)
+                    return result
+            else:
+                _data_source_stats['csv_files_missing'].add(fname)
+        _data_source_stats['oanda_fallbacks'][granularity_str] = \
+            _data_source_stats['oanda_fallbacks'].get(granularity_str, 0) + 1
     return await fetch_candles(symbol, granularity_str, count=count, end_time=end_time)
 
 
@@ -349,6 +392,7 @@ def _add_concurrent_analysis_sheets(wb, trade_logs: list, pnl_key: str,
 async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
     """Zero-friction Gann backtest (original engine, untouched logic)."""
     global _bt_progress
+    _reset_data_source_stats()
     bot_state['is_backtesting'] = True
     fname = f"GannBT_{datetime.now(timezone.utc).strftime('%H%M%S')}.xlsx"
     exec_mode = bot_state.get('gann_execution_mode', 'instant')
@@ -694,7 +738,8 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
             f"Break-Even: $0 ({res['be']})\n"
             f"WR: {round(res['win']/max(1, res['win']+res['loss'])*100)}% ({len(res['trade_logs'])} صفقة)\n"
             f"Max DD: ${round(res['max_dd'],2)}\n"
-            f"دورات H1: {len(res['cycle_logs'])} | Lot: {lot}"
+            f"دورات H1: {len(res['cycle_logs'])} | Lot: {lot}\n\n"
+            f"{_format_data_source_report()}"
         )
         # Excel generation
         wb = openpyxl.Workbook(); ws_trades = wb.active; ws_trades.title = "الصفقات"
@@ -863,6 +908,7 @@ async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None
     if bot_state.get('lt_mode') == 'idealized':
         await run_gann_backtest(start_dt, end_dt)
         return
+    _reset_data_source_stats()
 
     bot_state['is_live_twin_running'] = True
     fname = f"LiveTwin_{datetime.now(timezone.utc).strftime('%H%M%S')}.xlsx"
@@ -1290,7 +1336,8 @@ async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None
             f"عمولة إجمالية: -${round(res['total_commission'],2)} | سواب: ${round(res['total_swap'],2)}\n"
             f"صفقات مرفوضة (Requote): {res['rejected']} | نوافذ Rollover: {res['gap_events']}\n"
             f"Spread الأساسي: ${base_spread}"
-            f"{coverage_warning}"
+            f"{coverage_warning}\n\n"
+            f"{_format_data_source_report()}"
         )
 
         wb = openpyxl.Workbook()
