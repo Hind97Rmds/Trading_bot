@@ -420,6 +420,11 @@ bot_state: dict = {
     'lt_latency_ms_max': 200,
     'gann_spike_limit_pts': 20,
     'prot_spike_filter': True,
+    'csv_data_dir': None,                    # e.g. '/mnt/user-data/mt5_history' -- when set, run_gann_backtest
+                                               # and the Live-Twin engine read matching MT5-exported CSV
+                                               # files from this folder instead of calling OANDA.
+    'csv_broker_utc_offset_hours': 3.0,        # broker server's UTC offset, needed to convert the CSV's
+                                               # server-local DATE/TIME columns to true UTC
     'prot_exec_revalidation': True,
 
     'lt_mode': 'realistic',

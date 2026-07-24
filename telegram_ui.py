@@ -1153,6 +1153,38 @@ async def process_tg_update(update: dict) -> None:
             except Exception:
                 await send_tg_msg("❌ <b>خطأ في التاريخ!</b>")
                 return
+        if msg.startswith('/csvdir'):
+            parts_csv = msg.split(' ', 1)
+            if len(parts_csv) == 1 or parts_csv[1].strip().lower() in ('off', 'none', 'clear'):
+                bot_state['csv_data_dir'] = None
+                await save_bot_persistence()
+                await send_tg_msg("✅ تم إيقاف مصدر CSV — الباكتيست سيعود لجلب البيانات من OANDA كالمعتاد.")
+                return
+            path = parts_csv[1].strip()
+            if not os.path.isdir(path):
+                await send_tg_msg(f"❌ المسار غير موجود على السيرفر: <code>{path}</code>\n"
+                                   f"تأكد أنك رفعت ملفات الـCSV لهذا المسار على نفس الجهاز الذي يعمل عليه البوت.")
+                return
+            bot_state['csv_data_dir'] = path
+            await save_bot_persistence()
+            await send_tg_msg(f"✅ سيقرأ الباكتيست الآن من ملفات CSV في: <code>{path}</code>\n"
+                               f"(إن لم يجد ملف الرمز/الفريم المطلوب هناك، يعود تلقائياً لـOANDA).\n"
+                               f"أوفست توقيت خادم الوسيط الحالي: {bot_state.get('csv_broker_utc_offset_hours', 3.0)} ساعة "
+                               f"— عدّله عبر <code>/csvoffset</code> إذا لزم.")
+            return
+        if msg.startswith('/csvoffset'):
+            parts_off = msg.split(' ', 1)
+            if len(parts_off) == 1:
+                await send_tg_msg(f"أوفست توقيت خادم الوسيط الحالي: {bot_state.get('csv_broker_utc_offset_hours', 3.0)} ساعة\n"
+                                   f"لتغييره: <code>/csvoffset 3</code>")
+                return
+            try:
+                bot_state['csv_broker_utc_offset_hours'] = float(parts_off[1].strip())
+                await save_bot_persistence()
+                await send_tg_msg(f"✅ أوفست توقيت خادم الوسيط الآن: {bot_state['csv_broker_utc_offset_hours']} ساعة")
+            except ValueError:
+                await send_tg_msg("❌ أدخل رقماً صحيحاً، مثال: <code>/csvoffset 3</code>")
+            return
         if not msg.startswith('/') and msg in bot_state.get('menu_button_map', {}):
             cb = bot_state['menu_button_map'][msg]
             if cb != 'noop': await _handle_callback(cb, bot_state['chat_id'], None)

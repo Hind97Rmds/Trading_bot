@@ -43,6 +43,102 @@ from state import DAM_OFF
 GANN_DYNAMIC_RECALC_MINUTES = 5
 
 
+# ═══════════════════════════════════════════════════════════════════
+# MT5-EXPORTED CSV DATA SOURCE (optional, opt-in alternative to OANDA)
+# ═══════════════════════════════════════════════════════════════════
+# Why this exists: run_gann_backtest normally pulls every candle from OANDA
+# (via fetch_candles). The MQL5 EA/Strategy Tester instead uses the broker's
+# OWN price history. Two different vendors will occasionally disagree on an
+# H1/M1 candle's exact OHLC by a few cents -- and because every Gann level is
+# a percentage offset of one anchor close, that tiny disagreement cascades
+# into a different level ladder, which can flip whether a level gets touched
+# at all. There is no code fix for "two vendors recorded the market
+# slightly differently" -- the only real fix is feeding BOTH systems from
+# the exact same history. This section lets the Python backtest read
+# broker-exported CSV files instead of calling OANDA, when they're present.
+#
+# Expected file naming (place these in bot_state['csv_data_dir']):
+#   <SYMBOL>_<TF>.csv   e.g.  XAUUSD_H1.csv , XAUUSD_M1.csv , XAUUSD_M5.csv
+# (underscores in the bot's own symbol id like "XAU_USD" are stripped when
+# building this filename, to match MT5's own symbol naming convention.)
+#
+# Expected columns (matches MT5's Symbols > Bars > Export dialog output,
+# comma- or tab-delimited, with or without the <ANGLE_BRACKET> header style):
+#   DATE, TIME, OPEN, HIGH, LOW, CLOSE, [TICKVOL], [VOL], [SPREAD]
+# DATE/TIME are in the BROKER SERVER's own local time, not UTC -- set
+# bot_state['csv_broker_utc_offset_hours'] to that server's UTC offset
+# (e.g. 3 for a server running UTC+3) so timestamps convert correctly and
+# line up with OANDA's UTC-based candles for a fair comparison.
+
+_TF_TO_MT5_SUFFIX = {
+    '1m': 'M1', '2m': 'M2', '3m': 'M3', '4m': 'M4', '5m': 'M5', '6m': 'M6',
+    '10m': 'M10', '15m': 'M15', '20m': 'M20', '30m': 'M30', '1h': 'H1', '2h': 'H2', '4h': 'H4',
+}
+_csv_candle_cache: dict[str, list] = {}  # file path -> parsed candles, loaded once per process
+
+
+def _load_csv_candle_file(csv_path: str, broker_utc_offset_hours: float) -> list:
+    if csv_path in _csv_candle_cache:
+        return _csv_candle_cache[csv_path]
+    try:
+        df = pd.read_csv(csv_path, sep=None, engine='python')
+        df.columns = [str(c).strip().strip('<>').upper() for c in df.columns]
+        needed = ['DATE', 'TIME', 'OPEN', 'HIGH', 'LOW', 'CLOSE']
+        missing = [c for c in needed if c not in df.columns]
+        if missing:
+            c_log(f"CSV import [{csv_path}]: missing required columns {missing}, columns found: {list(df.columns)}")
+            _csv_candle_cache[csv_path] = []
+            return []
+        vol_col = 'TICKVOL' if 'TICKVOL' in df.columns else ('VOL' if 'VOL' in df.columns else None)
+
+        naive = pd.to_datetime(df['DATE'].astype(str) + ' ' + df['TIME'].astype(str),
+                                errors='coerce')
+        utc_time = naive - pd.Timedelta(hours=broker_utc_offset_hours)
+        utc_time = utc_time.dt.tz_localize('UTC')
+
+        out = []
+        for i in range(len(df)):
+            if pd.isna(naive.iloc[i]):
+                continue
+            out.append({
+                'time': utc_time.iloc[i],
+                'open': float(df['OPEN'].iloc[i]), 'high': float(df['HIGH'].iloc[i]),
+                'low': float(df['LOW'].iloc[i]), 'close': float(df['CLOSE'].iloc[i]),
+                'volume': float(df[vol_col].iloc[i]) if vol_col else 1.0,
+            })
+        out.sort(key=lambda c: c['time'])
+        c_log(f"CSV import [{csv_path}]: loaded {len(out)} candles "
+              f"({out[0]['time']} → {out[-1]['time']})" if out else f"CSV import [{csv_path}]: 0 usable rows")
+        _csv_candle_cache[csv_path] = out
+        return out
+    except Exception as e:
+        log_exception(f'_load_csv_candle_file [{csv_path}]', e)
+        _csv_candle_cache[csv_path] = []
+        return []
+
+
+async def _fetch_candles_hybrid(symbol: str, granularity_str: str, count: int = 5000,
+                                 end_time: datetime = None) -> list:
+    """Drop-in replacement for fetch_candles(): uses a matching MT5-exported
+    CSV file when bot_state['csv_data_dir'] is set AND the file exists,
+    otherwise transparently falls back to the normal OANDA fetch_candles()."""
+    csv_dir = bot_state.get('csv_data_dir')
+    if csv_dir:
+        suffix = _TF_TO_MT5_SUFFIX.get(granularity_str)
+        if suffix:
+            fname = f"{symbol.replace('_', '')}_{suffix}.csv"
+            path = os.path.join(csv_dir, fname)
+            if os.path.isfile(path):
+                offset = bot_state.get('csv_broker_utc_offset_hours', 3.0)
+                candles = _load_csv_candle_file(path, offset)
+                if candles:
+                    end = end_time if end_time else datetime.now(timezone.utc)
+                    end_ts = pd.Timestamp(end).tz_convert('UTC') if pd.Timestamp(end).tzinfo else pd.Timestamp(end, tz='UTC')
+                    filtered = [c for c in candles if c['time'] <= end_ts]
+                    return filtered[-count:] if count else filtered
+    return await fetch_candles(symbol, granularity_str, count=count, end_time=end_time)
+
+
 def _build_gann_cycle_defs(sym_state: dict, valid_h1: list, mc_1m: list) -> list[dict]:
     mode = bot_state.get('gann_calculation_mode', 'static_h1')
     cycle_h = sym_state['gann_cycle_hours']
@@ -316,7 +412,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
             await prog.set_phase(f'جلب بيانات الترند ({desc_ttf})...')
             max_period = max(sym_state['trend_vwap_period'], sym_state['trend_ema_period'], 100)
             trend_count = (delta_hours * (2 if ttf == '30m' else 1)) + max_period + 10
-            candles_trend = await fetch_candles(symbol, ttf, count=trend_count, end_time=end_dt)
+            candles_trend = await _fetch_candles_hybrid(symbol, ttf, count=trend_count, end_time=end_dt)
             if not candles_trend: continue
 
             df_trend = pd.DataFrame(candles_trend)
@@ -338,14 +434,14 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
 
             anchor_gran = bot_state.get('gann_anchor_tf', '1h')
             await prog.set_phase(f'جلب بيانات {_anchor_label()}...')
-            candles_h1 = await fetch_candles(symbol, anchor_gran, count=(delta_hours // _anchor_hours()) + 10, end_time=end_dt)
+            candles_h1 = await _fetch_candles_hybrid(symbol, anchor_gran, count=(delta_hours // _anchor_hours()) + 10, end_time=end_dt)
             if not candles_h1: continue
 
             await prog.set_phase('جلب شموع الفريمات الصغيرة...')
             monitor_tfs_data = {}
             days_diff = (end_dt - start_dt).days or 1
             need_1m = days_diff * 24 * 60 + 300
-            mc_1m = await fetch_candles(symbol, '1m', count=need_1m, end_time=end_dt)
+            mc_1m = await _fetch_candles_hybrid(symbol, '1m', count=need_1m, end_time=end_dt)
             if mc_1m:
                 _earliest_1m_seen[symbol] = min(c['time'] for c in mc_1m)
                 for c in mc_1m:
@@ -357,7 +453,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                 bmin = int(''.join(filter(str.isdigit, btf)))
                 if 'h' in btf: bmin *= 60
                 need_m = days_diff * 24 * (60 // max(bmin, 1)) + 300
-                mc = await fetch_candles(symbol, btf, count=need_m, end_time=end_dt)
+                mc = await _fetch_candles_hybrid(symbol, btf, count=need_m, end_time=end_dt)
                 if mc:
                     monitor_tfs_data[btf] = sorted(mc, key=lambda c: c['time'])
                     for c in mc:
@@ -830,7 +926,7 @@ async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None
             await prog.set_phase(f'جلب بيانات الترند ({ttf.upper()})...')
             max_period = max(sym_state['trend_vwap_period'], sym_state['trend_ema_period'], 100)
             trend_count = (delta_hours * (2 if ttf == '30m' else 1)) + max_period + 10
-            candles_trend = await fetch_candles(symbol, ttf, count=trend_count, end_time=end_dt)
+            candles_trend = await _fetch_candles_hybrid(symbol, ttf, count=trend_count, end_time=end_dt)
             if not candles_trend: continue
 
             df_trend = pd.DataFrame(candles_trend)
@@ -852,13 +948,13 @@ async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None
 
             anchor_gran = bot_state.get('gann_anchor_tf', '1h')
             await prog.set_phase(f'جلب بيانات {_anchor_label()}...')
-            candles_h1 = await fetch_candles(symbol, anchor_gran, count=(delta_hours // _anchor_hours()) + 10, end_time=end_dt)
+            candles_h1 = await _fetch_candles_hybrid(symbol, anchor_gran, count=(delta_hours // _anchor_hours()) + 10, end_time=end_dt)
             if not candles_h1: continue
 
             await prog.set_phase('جلب شموع الدقيقة الواحدة...')
             days_diff = (end_dt - start_dt).days or 1
             need_1m = days_diff * 24 * 60 + 300
-            mc_1m = await fetch_candles(symbol, '1m', count=need_1m, end_time=end_dt)
+            mc_1m = await _fetch_candles_hybrid(symbol, '1m', count=need_1m, end_time=end_dt)
             if not mc_1m: continue
             _earliest_1m_seen[symbol] = min(c['time'] for c in mc_1m)
             m1_by_symbol[symbol] = sorted(mc_1m, key=lambda c: c['time'])
@@ -868,7 +964,7 @@ async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None
                 bmin = int(''.join(filter(str.isdigit, btf)))
                 bmin = bmin * 60 if 'h' in btf else bmin
                 need_m = days_diff * 24 * (60 // max(bmin, 1)) + 300
-                mc = await fetch_candles(symbol, btf, count=need_m, end_time=end_dt)
+                mc = await _fetch_candles_hybrid(symbol, btf, count=need_m, end_time=end_dt)
                 if mc: monitor_tfs_data[btf] = sorted(mc, key=lambda c: c['time'])
 
             start_ts = start_dt.timestamp(); end_ts = end_dt.timestamp()
