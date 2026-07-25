@@ -158,12 +158,10 @@ async def gann_monitor_scanner() -> None:
                         chk_px = None
                     if chk_px is None:
                         continue
-                    pv = SYMBOL_INFO[symbol]['pip_value']
-                    margin = sym_state.get('gann_touch_margin_pts', 5) * pv
                     pending = sym_state.setdefault('gann_pending_touch_blocked', {})
                     for lv in gann_active_levels(symbol):
                         lkey = lv.get('key') or f"{lv.get('name')}_{lv['price']}"
-                        if abs(chk_px - lv['price']) <= margin and lkey not in pending:
+                        if chk_px == lv['price'] and lkey not in pending:
                             pending[lkey] = {
                                 'first_seen': datetime.now(timezone.utc).isoformat(),
                                 'price': chk_px,
@@ -436,7 +434,6 @@ async def gann_monitor_scanner() -> None:
                                 macro_trend_up = vwap_up if vwap_up == ema_up else None
 
                     levels = gann_active_levels(symbol)
-                    margin = sym_state['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
                     detect_time = datetime.now(timezone.utc)
 
                     tf_data = {}
@@ -448,7 +445,7 @@ async def gann_monitor_scanner() -> None:
                                            'skip_reason': f'insufficient_oanda_candles(got={len(candles) if candles else 0})'})
                             continue
                         tf_data[tf] = {'candles': candles, 'closed_close': float(candles[-1]['close'])}
-                    _gann_cache[symbol] = {'levels': levels, 'margin': margin, 'trend_up': macro_trend_up,
+                    _gann_cache[symbol] = {'levels': levels, 'trend_up': macro_trend_up,
                                             'enabled_tfs': list(tf_data.keys()), 'tf_data': tf_data,
                                             'refreshed_at': detect_time}
                     q = live_quotes.get(symbol)
@@ -468,9 +465,8 @@ async def gann_monitor_scanner() -> None:
                     _diag_log_add({'ts': detect_time, 'symbol': symbol, 'master_px': diag_px,
                                    'price_source': price_source, 'ws_status': ws_status,
                                    'ws_quote_age_s': ws_age_s, 'trend_up': macro_trend_up,
-                                   'margin': margin, 'nearest_compatible_level': nearest_price,
+                                   'nearest_compatible_level': nearest_price,
                                    'nearest_dist': nearest_dist,
-                                   'within_margin': (nearest_dist is not None and nearest_dist <= margin),
                                    'skip_reason': ('no_price_available' if diag_px is None else
                                                    'cache_refresh_only(firing_is_now_tick_driven)')})
                 except Exception as sym_exc:
@@ -661,7 +657,6 @@ async def gann_run_diagnostics() -> str:
                     macro_trend_up = current_trend_close > current_ema
                     lines.append(f"الاتجاه (EMA{p_ema}): {'صاعد' if macro_trend_up else 'هابط'}")
         levels = gann_active_levels(symbol)
-        margin = sym_state['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
         enabled_tfs = [tf for tf, on in sym_state['gann_monitor_tfs'].items() if on]
         if not enabled_tfs:
             lines.append("🛑 لا يوجد أي فريم مفعّل.")
@@ -699,20 +694,12 @@ async def gann_run_diagnostics() -> str:
                     nearest = {'dist': dist, 'price': lv['price'], 'status': status, 'is_buy': is_buy}
             if nearest is None:
                 lines.append(f"[{tf}] لا توجد مستويات متوافقة."); continue
-            within_margin = nearest['dist'] <= margin
+            touched = nearest['dist'] == 0
             reason_blocked = []
             if nearest['status'] == 'used': reason_blocked.append('المستوى مستخدم بالفعل')
-            if not within_margin: reason_blocked.append(f"بعيد عن الهامش ({nearest['dist']:.3f} > {margin:.3f})")
+            if not touched: reason_blocked.append(f"السعر بعيد عن المستوى ({nearest['dist']:.3f})")
             exec_mode = bot_state.get('gann_execution_mode', 'instant')
-            closed_close = float(candles[-1]['close'])
-            spike_limit = bot_state.get('gann_spike_limit_pts', 20) * SYMBOL_INFO[symbol]['pip_value']
-            if within_margin and exec_mode == 'close':
-                if abs(closed_close - nearest['price']) > margin:
-                    reason_blocked.append(f"وضع Close: الإغلاق بعيد")
-            elif within_margin and exec_mode == 'hybrid':
-                if bot_state.get('prot_spike_filter', True) and abs(live_px - closed_close) > spike_limit:
-                    reason_blocked.append(f"وضع Hybrid: قفزة سعرية")
-            status_icon = '✅ جاهز للدخول' if (within_margin and not reason_blocked) else ('🛑 ' + ' | '.join(reason_blocked))
+            status_icon = '✅ جاهز للدخول' if (touched and not reason_blocked) else ('🛑 ' + ' | '.join(reason_blocked))
             dir_lbl = 'دعم/شراء 🟢' if nearest['is_buy'] else 'مقاومة/بيع 🔴'
             lines.append(f"[{tf}] السعر: {live_px:.2f} | أقرب مستوى [{dir_lbl}]: {nearest['price']:.2f} (فرق {nearest['dist']:.3f}) | {status_icon}")
     return "\n".join(lines)
@@ -728,8 +715,8 @@ async def export_diag_log_excel() -> None:
     if 'ts' in df.columns:
         df['الوقت (DAM)'] = df['ts'].apply(lambda t: _utc_to_dam(t).strftime('%Y-%m-%d %H:%M:%S') if pd.notna(t) else '')
         df = df.drop(columns=['ts'])
-    preferred_order = ['الوقت (DAM)', 'symbol', 'tf', 'master_px', 'trend_up', 'margin',
-                       'nearest_compatible_level', 'nearest_dist', 'within_margin',
+    preferred_order = ['الوقت (DAM)', 'symbol', 'tf', 'master_px', 'trend_up',
+                       'nearest_compatible_level', 'nearest_dist',
                        'touch_attempted', 'skip_reason']
     cols = [c for c in preferred_order if c in df.columns] + [c for c in df.columns if c not in preferred_order]
     df = df[cols]

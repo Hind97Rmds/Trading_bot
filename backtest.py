@@ -441,7 +441,6 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
             sym_state = bot_state['symbol_state'][symbol]
             cycle_h = sym_state['gann_cycle_hours']; tpsl_mode = sym_state['gann_tpsl_mode']
             pv = SYMBOL_INFO[symbol]['pip_value']; lot = sym_state['lot_size']
-            margin = sym_state['gann_touch_margin_pts'] * pv
             cs = SYMBOL_INFO[symbol]['contract_size']
             prec = SYMBOL_INFO[symbol]['prec']
 
@@ -564,12 +563,12 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                                 combo_key = f"{base_combo}_{channel}" if exec_mode_bt == 'all_concurrent' else base_combo
                                 if combo_key in level_used: continue
                                 if channel == 'close':
-                                    if abs(bar_close - lv['price']) > margin: continue
+                                    if abs(bar_close - lv['price']) != 0: continue
                                 elif channel == 'hybrid':
-                                    if not (bar_low - margin <= lv['price'] <= bar_high + margin): continue
+                                    if not (bar_low <= lv['price'] <= bar_high): continue
                                     if bot_state.get('prot_spike_filter', True) and abs(bar_close - lv['price']) > spike_limit: continue
                                 else:
-                                    if not (bar_low - margin <= lv['price'] <= bar_high + margin): continue
+                                    if not (bar_low <= lv['price'] <= bar_high): continue
 
                                 entry = lv['price']
                                 tf_tp = _gann_tf_tp(symbol, btf); tf_sl = _gann_tf_sl(symbol, btf)
@@ -959,7 +958,7 @@ async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None
         for symbol in active_symbols:
             sym_state = bot_state['symbol_state'][symbol]
             cycle_h = sym_state['gann_cycle_hours']; tpsl_mode = sym_state['gann_tpsl_mode']
-            pv = SYMBOL_INFO[symbol]['pip_value']; lot = sym_state['lot_size']; margin = sym_state['gann_touch_margin_pts'] * pv
+            pv = SYMBOL_INFO[symbol]['pip_value']; lot = sym_state['lot_size']
             cs = SYMBOL_INFO[symbol]['contract_size']
 
             quote = symbol.split('_')[1] if '_' in symbol else 'USD'
@@ -1074,12 +1073,12 @@ async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None
                                 if combo_key in level_used: continue
 
                                 if channel == 'close':
-                                    if abs(bar_close - lv['price']) > margin: continue
+                                    if abs(bar_close - lv['price']) != 0: continue
                                 elif channel == 'hybrid':
-                                    if not (bar_low - margin <= lv['price'] <= bar_high + margin): continue
+                                    if not (bar_low <= lv['price'] <= bar_high): continue
                                     if bot_state.get('prot_spike_filter', True) and prev_bar_close is not None and abs(bar_close - prev_bar_close) > spike_limit: continue
                                 else:
-                                    if not (bar_low - margin <= lv['price'] <= bar_high + margin): continue
+                                    if not (bar_low <= lv['price'] <= bar_high): continue
 
                                 entry = lv['price']
                                 tf_tp = _gann_tf_tp(symbol, btf); tf_sl = _gann_tf_sl(symbol, btf)
@@ -1437,7 +1436,6 @@ async def run_live_twin_forward() -> None:
                 if not cache:
                     continue
 
-                margin = cache['margin']
                 levels = cache['levels']
                 trend_up = cache['trend_up']
                 entry_mode = sym_state['gann_entry_mode']
@@ -1467,7 +1465,7 @@ async def run_live_twin_forward() -> None:
                             if not is_buy and trend_up: continue
 
                         check_px = tick['bid'] if is_buy else tick['ask']
-                        if abs(check_px - lv['price']) > margin:
+                        if check_px != lv['price']:
                             continue
 
                         _forward_stats['total_signals'] += 1

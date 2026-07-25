@@ -177,7 +177,7 @@ def get_protection_keyboard() -> dict:
 def get_gann_keyboard() -> dict:
     sym = bot_state['ui_selected_symbol']; sym_state = bot_state['symbol_state'][sym]
     zf = sym_state['gann_zone_filter']; em = sym_state['gann_entry_mode']
-    mg = sym_state['gann_touch_margin_pts']; tpsm = sym_state['gann_tpsl_mode']
+    tpsm = sym_state['gann_tpsl_mode']
     hrs = sym_state['gann_cycle_hours']
     cyc = '🟢 نشطة' if sym_state['gann_cycle_active'] else '⚫ غير نشطة'
     open_n = len(sym_state['gann_open_trades'])
@@ -261,9 +261,6 @@ def get_gann_keyboard() -> dict:
         [{'text': 'Lot −0.01', 'callback_data': 'gann_dec_lot'},
          {'text': f'حجم اللوت: {sym_state["lot_size"]}', 'callback_data': 'noop'},
          {'text': 'Lot +0.01', 'callback_data': 'gann_inc_lot'}],
-        [{'text': 'Margin −1', 'callback_data': 'gann_dec_margin'},
-         {'text': f'هامش اللمس {mg}p', 'callback_data': 'noop'},
-         {'text': 'Margin +1', 'callback_data': 'gann_inc_margin'}],
         [{'text': '── TP / SL ──', 'callback_data': 'noop'}],
         [{'text': tps_lbl, 'callback_data': 'gann_toggle_tpsl'}],
     ]
@@ -626,8 +623,8 @@ async def _cb_tg_prot_spike(chat_id, msg_id, sym, sym_state):
 
 @_exact('tg_prot_exec_reval')
 async def _cb_tg_prot_exec_reval(chat_id, msg_id, sym, sym_state):
-    # Explicit ON/OFF switch for the execution-time re-check in _gann_open_trade
-    # (abs(fresh_px - level_price) > margin). Disabling it means: once a touch
+    # Explicit ON/OFF switch for the execution-time re-check in _gann_open_trade.
+    # Disabling it means: once a touch
     # is detected and passes is_trading_allowed(), the trade opens using
     # whatever the live price is at that moment -- no second "is this still a
     # real touch" gate. This trades a bit of entry-price precision for not
@@ -888,8 +885,6 @@ for _spec in [
     ('gann_inc_vwap',    'trend_vwap_period',      10, 500, +10, int),
     ('gann_dec_ema',     'trend_ema_period',       10, 500, -10, int),
     ('gann_inc_ema',     'trend_ema_period',       10, 500, +10, int),
-    ('gann_dec_margin',  'gann_touch_margin_pts',  1,  50,  -1, int),
-    ('gann_inc_margin',  'gann_touch_margin_pts',  1,  50,  +1, int),
     ('gann_dec_hours',   'gann_cycle_hours',       1,  24,  -1, int),
     ('gann_inc_hours',   'gann_cycle_hours',       1,  24,  +1, int),
     ('gann_dec_tp10',    'gann_tp_points',         10, 1000, -10, int),

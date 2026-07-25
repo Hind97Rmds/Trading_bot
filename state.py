@@ -390,7 +390,6 @@ def _make_symbol_state() -> dict:
         'break_even_enabled': False,
         'gann_be_trigger_points': 40,
         'gann_monitor_tfs': {tf: (tf in ['5m', '10m', '15m', '20m', '30m', '1h', '4m', '6m', '2h', '1m', '2m', '3m']) for tf in _TFS},
-        'gann_touch_margin_pts': 5,
         'gann_tpsl_mode': 'fixed',
         'gann_tp_points': 70,
         'gann_sl_points': 110,

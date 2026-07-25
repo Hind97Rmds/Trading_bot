@@ -170,8 +170,6 @@ async def _execute_smart_order(symbol: str, is_buy: bool, lot: float,
             ioc_fail_reason = 'Skipped — level below market for sell limit'
             raise _SkipLimitPhase(ioc_fail_reason)
 
-    margin = bot_state['symbol_state'][symbol]['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
-
     limit_opts = {
         'slippage': max_slippage_points,
         'expirationType': 'ORDER_TIME_SPECIFIED',
@@ -354,7 +352,6 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
         fresh_px, fresh_feed_source, fresh_feed_age_ms = initial_px, 'ws', feed_age_ms
         if is_real:
             fresh_px, fresh_feed_source, fresh_feed_age_ms = await _lq_price_with_fallback(symbol)
-        margin = sym_state['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
         from market_data import _QUOTE_STALE_SECONDS
 
         if fresh_px is None:
@@ -365,17 +362,6 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
                 f"المستوى: {level['price']:.2f}\n"
                 f"تم رفض الصفقة — تغذية السعر غير محدثة (أكبر من {_QUOTE_STALE_SECONDS}ث).\n"
                 f"السبب: تجنب استدعاء OANDA REST البطيء ({50}-{150}ms) الذي يفسد السكالبينج."
-            )
-            return
-        if bot_state.get('prot_exec_revalidation', True) and abs(fresh_px - level['price']) > margin:
-            bot_state['symbol_state'][symbol]['gann_level_status'][_lk] = 'used'
-            from telegram_ui import send_tg_msg
-            drift = abs(fresh_px - initial_px) if (fresh_px is not None and initial_px is not None) else None
-            await send_tg_msg(
-                f"<b>⏭️ [{symbol} - جان {tf}]</b>  {reason}\n"
-                f"المستوى: {level['price']:.2f}\n"
-                f"تم تجاهل الفريم — السعر ابتعد عن المستوى أثناء التنفيذ "
-                f"({'لا يمكن التأكد من السعر الحالي' if fresh_px is None else f'{fresh_px:.2f}'}) ولم يعد لمساً حقيقياً."
             )
             return
 
@@ -585,7 +571,7 @@ async def _gann_tick_fire_check(symbol: str, live_px: float, feed_age_ms: float)
             if open_count >= max_concurrent:
                 return
 
-            margin = cache['margin']; levels = cache['levels']; trend_up = cache['trend_up']
+            levels = cache['levels']; trend_up = cache['trend_up']
             entry_mode = sym_state['gann_entry_mode']
             exec_mode = bot_state.get('gann_execution_mode', 'instant')
             pv = SYMBOL_INFO[symbol]['pip_value']
@@ -629,12 +615,11 @@ async def _gann_tick_fire_check(symbol: str, live_px: float, feed_age_ms: float)
                         check_px = q.get('bid' if is_buy else 'ask') or live_px
 
                         if channel == 'close':
-                            if abs(closed_close - lv['price']) > margin: continue
+                            if abs(closed_close - lv['price']) != 0: continue
                         elif channel == 'hybrid':
-                            if abs(check_px - lv['price']) > margin: continue
-                            if bot_state.get('prot_spike_filter', True) and abs(check_px - closed_close) > spike_limit: continue
+                            if abs(check_px - lv['price']) > spike_limit and bot_state.get('prot_spike_filter', True): continue
                         else:
-                            if abs(check_px - lv['price']) > margin: continue
+                            pass
 
                         sym_state['gann_level_status'][combo_key] = 'used'
 
