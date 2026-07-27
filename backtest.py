@@ -187,14 +187,10 @@ def _build_gann_cycle_defs(sym_state: dict, valid_h1: list, mc_1m: list) -> list
     cycle_h = sym_state['gann_cycle_hours']
     if mode != 'dynamic_live':
         out = []
-        last_started = None  # mirrors gann_monitor.py's sym_state['gann_last_h1_time'] gating
         for h1 in valid_h1:
-            if last_started is not None and (h1['time'] - last_started).total_seconds() / 3600.0 < cycle_h:
-                continue  # not enough hours have passed since the last cycle -- skip, don't re-anchor yet
             t_start = h1['time'] + timedelta(hours=1)
             out.append({'t_start': t_start, 't_end': t_start + timedelta(hours=cycle_h),
                          'close': float(h1['close'])})
-            last_started = h1['time']
         return out
     px_series = sorted(mc_1m, key=lambda c: c['time']) if mc_1m else []
     if not px_series:
